@@ -53,6 +53,42 @@ const UNITS = ["mq","ml","pz","set","kg","lt","h","lotto"];
 const CAT_COLORS = ["#8B7355","#7A8C6E","#6B7FA3","#9B6B5A","#7B6E8E","#5B8A8B","#B8925A","#5A8BAA","#9B7B6B","#7B8B5A","#6B7B9B","#5B6B8B","#C4714A","#B8925A","#A67C52","#6B8E6B"];
 
 // ═══════════════════════════════════════════════════════════════════════
+// EXCEL FIELD ALIASES
+// ═══════════════════════════════════════════════════════════════════════
+const FIELD_ALIASES={
+  description:      ["descrizione","description","nome","articolo","prodotto","denominazione","oggetto","voce","elemento"],
+  referenceSupplier:["fornitore","supplier","marca","brand","produttore","azienda","fornitore rif","fornitore di riferimento"],
+  supplierCode:     ["codice fornitore","cod fornitore","codice prodotto","sku","ref fornitore","cod.fornitore","supplier code","part number"],
+  webLink:          ["link","url","sito","web","scheda","link prodotto","scheda prodotto","collegamento"],
+  qty:              ["quantità","qty","q.tà","quantita","qta","quantity","num","numero","n."],
+  unit:             ["u.m.","um","unità","unita","unit","misura","udm","unità di misura"],
+  unitPrice:        ["prezzo unit","prezzo unitario","prezzo un.","costo unitario","costo unit","price","unit price","prezzo","costo","p.u."],
+  notes:            ["note","notes","annotazioni","commenti","specifiche","descrizione tecnica","osservazioni"],
+  status:           ["stato","status","avanzamento","fase"],
+  zoneId:           ["zona","zone","area","settore"],
+  ambiente:         ["ambiente","locale","stanza","room","spazio"],
+  floorId:          ["piano","floor","livello","level"],
+  catId:            ["categoria","cat","category","tipologia","tipo"],
+  code:             ["codice abaco","cod abaco","codice voce","code","id voce","riferimento"],
+};
+const autoMatchField=h=>{
+  const n=String(h||"").toLowerCase().trim().replace(/\s+/g," ");
+  for(const[field,aliases]of Object.entries(FIELD_ALIASES)){
+    if(aliases.some(a=>n===a||n.includes(a)))return field;
+  }
+  return null;
+};
+const statusFromStr=s=>{
+  const v=String(s||"").toLowerCase();
+  if(v.includes("approv"))return"approvato";
+  if(v.includes("ordin")) return"ordinato";
+  if(v.includes("conseg"))return"consegnato";
+  if(v.includes("install"))return"installato";
+  if(v.includes("valut")) return"in_valutazione";
+  return"da_definire";
+};
+
+// ═══════════════════════════════════════════════════════════════════════
 // HELPERS
 // ═══════════════════════════════════════════════════════════════════════
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7);
@@ -869,14 +905,262 @@ function ItemModal({item,project,role,supplierName,onSave,onClose}){
     </div>
   );
 }
+// ═══════════════════════════════════════════════════════════════════════
+// EXCEL IMPORT WIZARD
+// ═══════════════════════════════════════════════════════════════════════
+function ExcelImportWizard({project,onImport,onClose}){
+  const [step,setStep]=useState("upload");
+  const [rawRows,setRawRows]=useState([]);
+  const [headers,setHeaders]=useState([]);
+  const [mapping,setMapping]=useState({});
+  const [unknownHeaders,setUnknownHeaders]=useState([]);
+  const [preview,setPreview]=useState([]);
+  const [importing,setImporting]=useState(false);
+  const [result,setResult]=useState(null);
+  const fileRef=useRef();
+
+  const KNOWN_FIELDS=[
+    {key:"description",label:"Descrizione"},{key:"referenceSupplier",label:"Fornitore"},
+    {key:"supplierCode",label:"Codice fornitore"},{key:"webLink",label:"Link prodotto"},
+    {key:"qty",label:"Quantità"},{key:"unit",label:"Unità misura"},
+    {key:"unitPrice",label:"Prezzo unitario"},{key:"notes",label:"Note"},
+    {key:"status",label:"Stato"},{key:"zoneId",label:"Zona"},
+    {key:"ambiente",label:"Ambiente"},{key:"floorId",label:"Piano"},
+    {key:"catId",label:"Categoria"},{key:"code",label:"Codice abaco"},
+  ];
+
+  const handleFile=async e=>{
+    const file=e.target.files?.[0];if(!file)return;
+    const ab=await file.arrayBuffer();
+    const wb=XLSX.read(ab,{type:"array"});
+    const ws=wb.Sheets[wb.SheetNames[0]];
+    const data=XLSX.utils.sheet_to_json(ws,{header:1,defval:""});
+    if(!data.length)return;
+    const hdrs=data[0].map(h=>String(h||"").trim()).filter(Boolean);
+    const rows=data.slice(1).filter(r=>r.some(c=>c!==""));
+    setHeaders(hdrs);setRawRows(rows);
+    const autoMap={};const unknown=[];
+    hdrs.forEach(h=>{
+      const match=autoMatchField(h);
+      if(match)autoMap[h]={action:"map",target:match};
+      else unknown.push(h);
+    });
+    setMapping(autoMap);setUnknownHeaders(unknown);
+    setStep(unknown.length>0?"mapping":"preview");
+  };
+
+  const buildPreview=useCallback(()=>rawRows.slice(0,4).map(row=>{
+    const obj={};
+    headers.forEach((h,i)=>{
+      const m=mapping[h];if(!m||m.action==="skip")return;
+      const val=String(row[i]||"").trim();
+      if(m.action==="map")obj[m.target]=val;
+      else if(m.action==="custom"&&m.customLabel)obj[`★ ${m.customLabel}`]=val;
+    });
+    return obj;
+  }),[rawRows,headers,mapping]);
+
+  useEffect(()=>{if(step==="preview")setPreview(buildPreview());},[step,buildPreview]);
+
+  const doImport=async()=>{
+    setImporting(true);
+    const imported=rawRows.map(row=>{
+      const obj={id:uid(),offers:[],comments:[],image:null,created:new Date().toISOString().slice(0,10)};
+      headers.forEach((h,i)=>{
+        const m=mapping[h];if(!m||m.action==="skip")return;
+        const val=String(row[i]||"").trim();
+        if(m.action==="map"){
+          if(m.target==="qty"||m.target==="unitPrice")obj[m.target]=parseFloat(val.replace(",","."))||0;
+          else if(m.target==="status")obj[m.target]=statusFromStr(val);
+          else obj[m.target]=val;
+        }else if(m.action==="custom"&&m.customLabel){
+          obj[`_custom_${m.customLabel.replace(/\s+/g,"_")}`]=val;
+        }
+      });
+      if(!obj.description&&!obj.code)return null;
+      if(!obj.status)obj.status="da_definire";
+      if(!obj.unit)obj.unit="pz";
+      if(!obj.code)obj.code=genCode(obj.zoneId||"XX",obj.catId||"XX",[]);
+      return obj;
+    }).filter(Boolean);
+    setResult({count:imported.length});
+    onImport(imported);
+    setStep("done");setImporting(false);
+  };
+
+  const canProceed=!unknownHeaders.some(h=>{
+    const m=mapping[h];
+    return(m?.action==="map"&&!m?.target)||(m?.action==="custom"&&!m?.customLabel);
+  });
+
+  const stepLabels=["upload","mapping","preview","done"];
+  const stepNames=["Carica","Mappa","Anteprima","Fine"];
+
+  return(
+    <div style={{position:"fixed",inset:0,zIndex:2000,display:"flex",alignItems:"center",justifyContent:"center",background:"rgba(28,25,22,0.55)",backdropFilter:"blur(3px)"}}>
+      <div style={{background:C.bg,borderRadius:18,width:step==="mapping"?680:520,maxWidth:"96vw",maxHeight:"90vh",display:"flex",flexDirection:"column",boxShadow:"0 24px 64px rgba(0,0,0,0.25)",border:`1px solid ${C.border}`,overflow:"hidden"}}>
+        {/* Header */}
+        <div style={{padding:"18px 22px",borderBottom:`1px solid ${C.border}`,display:"flex",justifyContent:"space-between",alignItems:"center",flexShrink:0}}>
+          <div>
+            <div style={{fontSize:15,fontWeight:600,color:C.text}}>Importa da Excel</div>
+            <div style={{fontSize:12,color:C.muted,marginTop:2}}>
+              {step==="upload"&&"Carica il file Excel con il tuo abaco"}
+              {step==="mapping"&&`${unknownHeaders.length} colonne non riconosciute — scegli cosa farne`}
+              {step==="preview"&&`Anteprima — ${rawRows.length} righe trovate`}
+              {step==="done"&&"Importazione completata"}
+            </div>
+          </div>
+          <button onClick={onClose} style={{background:"none",border:"none",cursor:"pointer",fontSize:20,color:C.muted}}>×</button>
+        </div>
+        {/* Step bar */}
+        <div style={{display:"flex",borderBottom:`1px solid ${C.border}`,flexShrink:0}}>
+          {stepLabels.map((s,i)=>(
+            <div key={s} style={{flex:1,padding:"9px 0",textAlign:"center",fontSize:11,fontWeight:500,
+              color:step===s?C.accent:stepLabels.indexOf(step)>i?"#059669":C.muted,
+              borderBottom:step===s?`2px solid ${C.accent}`:"2px solid transparent"}}>
+              {stepNames[i]}
+            </div>
+          ))}
+        </div>
+        {/* Body */}
+        <div style={{flex:1,overflowY:"auto",padding:"20px 22px"}}>
+
+          {step==="upload"&&(
+            <div style={{display:"flex",flexDirection:"column",gap:14}}>
+              <div onClick={()=>fileRef.current?.click()}
+                style={{border:`2px dashed ${C.border}`,borderRadius:12,padding:"40px 20px",textAlign:"center",cursor:"pointer",background:"#FFF"}}
+                onMouseEnter={e=>e.currentTarget.style.borderColor=C.accent} onMouseLeave={e=>e.currentTarget.style.borderColor=C.border}>
+                <div style={{fontSize:32,marginBottom:8}}>📊</div>
+                <div style={{fontSize:14,fontWeight:500,color:C.text,marginBottom:4}}>Clicca per selezionare il file</div>
+                <div style={{fontSize:12,color:C.muted}}>Excel .xlsx .xls oppure .csv</div>
+              </div>
+              <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" style={{display:"none"}} onChange={handleFile}/>
+              <div style={{background:"#F8F4EF",borderRadius:8,padding:"12px 14px"}}>
+                <div style={{fontSize:11,fontWeight:600,color:C.muted,marginBottom:6}}>COLONNE RICONOSCIUTE AUTOMATICAMENTE</div>
+                <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
+                  {["descrizione","fornitore","quantità","prezzo unit","zona","ambiente","piano","categoria","stato","note","link","codice fornitore"].map(a=>(
+                    <span key={a} style={{fontSize:11,padding:"2px 8px",borderRadius:99,background:C.border,color:C.muted}}>{a}</span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {step==="mapping"&&(
+            <div style={{display:"flex",flexDirection:"column",gap:10}}>
+              {Object.entries(mapping).filter(([,m])=>m.action==="map").length>0&&(
+                <div style={{background:"#F0FDF4",borderRadius:8,padding:"10px 14px",border:"1px solid #D1FAE5",marginBottom:4}}>
+                  <div style={{fontSize:11,fontWeight:600,color:"#059669",marginBottom:4}}>✓ Colonne abbinate automaticamente</div>
+                  <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+                    {Object.entries(mapping).filter(([,m])=>m.action==="map").map(([h,m])=>(
+                      <span key={h} style={{fontSize:11,padding:"2px 8px",borderRadius:99,background:"white",border:`1px solid ${C.border}`,color:C.text}}>
+                        <span style={{color:C.muted}}>{h}</span> → <strong>{KNOWN_FIELDS.find(f=>f.key===m.target)?.label||m.target}</strong>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <div style={{fontSize:12,fontWeight:600,color:C.text}}>Colonne non riconosciute:</div>
+              {unknownHeaders.map(h=>{
+                const m=mapping[h]||{action:"skip"};
+                const exVal=String(rawRows[0]?.[headers.indexOf(h)]||"").slice(0,30);
+                return(
+                  <div key={h} style={{border:`1px solid ${C.border}`,borderRadius:8,padding:"12px 14px",background:m.action==="skip"?"#F8F4EF":"#FFF"}}>
+                    <div style={{display:"flex",alignItems:"flex-start",gap:10}}>
+                      <div style={{flex:"0 0 auto"}}>
+                        <div style={{fontSize:13,fontWeight:600,color:C.text,fontFamily:"'DM Mono',monospace"}}>"{h}"</div>
+                        {exVal&&<div style={{fontSize:11,color:C.muted,marginTop:2}}>es: "{exVal}"</div>}
+                      </div>
+                      <div style={{flex:1,display:"flex",flexDirection:"column",gap:6}}>
+                        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                          {[["map","Abbina a campo"],["custom","Campo personalizzato"],["skip","Ignora"]].map(([act,lbl])=>(
+                            <label key={act} style={{display:"flex",alignItems:"center",gap:4,cursor:"pointer",fontSize:12,padding:"4px 10px",borderRadius:99,border:`1px solid ${m.action===act?"#3B82F6":C.border}`,background:m.action===act?"#EFF6FF":"#F8F4EF",color:m.action===act?"#3B82F6":C.muted,fontWeight:m.action===act?600:400}}>
+                              <input type="radio" checked={m.action===act} onChange={()=>setMapping(mp=>({...mp,[h]:{...m,action:act}}))} style={{display:"none"}}/>
+                              {lbl}
+                            </label>
+                          ))}
+                        </div>
+                        {m.action==="map"&&(
+                          <Sel value={m.target||""} onChange={v=>setMapping(mp=>({...mp,[h]:{...m,target:v}}))} style={{width:"auto",maxWidth:240}}>
+                            <option value="">— Seleziona campo —</option>
+                            {KNOWN_FIELDS.map(f=><option key={f.key} value={f.key}>{f.label}</option>)}
+                          </Sel>
+                        )}
+                        {m.action==="custom"&&(
+                          <Inp value={m.customLabel||h} onChange={v=>setMapping(mp=>({...mp,[h]:{...m,customLabel:v}}))} placeholder="Nome campo personalizzato" style={{maxWidth:240}}/>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {step==="preview"&&(
+            <div>
+              <div style={{fontSize:12,color:C.muted,marginBottom:12}}>Prime 4 righe su {rawRows.length} totali</div>
+              <div style={{overflowX:"auto",borderRadius:8,border:`1px solid ${C.border}`}}>
+                <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                  <thead>
+                    <tr style={{background:"#F8F4EF"}}>
+                      {Object.keys(preview[0]||{}).map(k=>(
+                        <th key={k} style={{padding:"7px 10px",textAlign:"left",fontWeight:600,color:C.muted,whiteSpace:"nowrap",borderBottom:`1px solid ${C.border}`,fontSize:11}}>{k}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {preview.map((row,i)=>(
+                      <tr key={i} style={{borderBottom:`1px solid ${C.border}`}}>
+                        {Object.values(row).map((v,j)=>(
+                          <td key={j} style={{padding:"6px 10px",color:C.text,maxWidth:160,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{String(v||"—")}</td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div style={{marginTop:12,padding:"10px 14px",background:"#FFFBEB",borderRadius:8,fontSize:12,color:C.gold}}>
+                ⚠ Verranno importate {rawRows.length} righe come nuove voci nel progetto.
+              </div>
+            </div>
+          )}
+
+          {step==="done"&&result&&(
+            <div style={{textAlign:"center",padding:"24px 0"}}>
+              <div style={{fontSize:40,marginBottom:12}}>✅</div>
+              <div style={{fontSize:16,fontWeight:600,color:C.text,marginBottom:6}}>{result.count} voci importate</div>
+              <div style={{fontSize:12,color:C.muted}}>Vai all'Abaco per completare i campi mancanti</div>
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div style={{padding:"14px 22px",borderTop:`1px solid ${C.border}`,display:"flex",justifyContent:"space-between",alignItems:"center",flexShrink:0}}>
+          <div style={{fontSize:12,color:C.muted}}>
+            {step==="mapping"&&`${rawRows.length} righe · ${headers.length} colonne`}
+            {step==="preview"&&`${rawRows.length} righe pronte`}
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <Btn variant="secondary" onClick={onClose}>Annulla</Btn>
+            {step==="mapping"&&<Btn onClick={()=>setStep("preview")} disabled={!canProceed}>Continua →</Btn>}
+            {step==="preview"&&<><Btn variant="secondary" onClick={()=>setStep("mapping")}>← Indietro</Btn><Btn onClick={doImport} disabled={importing}>{importing?"Importo...":"Importa adesso"}</Btn></>}
+            {step==="done"&&<Btn onClick={onClose}>Chiudi</Btn>}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // ABACO TABLE
 // ═══════════════════════════════════════════════════════════════════════
-function AbacoTable({project,role,supplierName,onEdit,onDelete,onAdd,onExport,filters,setFilters}){
+function AbacoTable({project,role,supplierName,onEdit,onDelete,onAdd,onExport,onImport,filters,setFilters}){
   const {items,zones,categories,floors}=project;
   const perm=ROLES[role];
   const [confirmDel,setConfirmDel]=useState(null);
+  const [showImport,setShowImport]=useState(false);
   const [filterFloor,    setFilterFloor]    = useState("");
   const [filterAmbiente, setFilterAmbiente] = useState("");
   const [filterSupplier, setFilterSupplier] = useState("");
@@ -915,7 +1199,8 @@ function AbacoTable({project,role,supplierName,onEdit,onDelete,onAdd,onExport,fi
           </p>
         </div>
         <div style={{display:"flex",gap:8}}>
-          {perm.canSeePrice&&<Btn variant="secondary" onClick={onExport} size="sm">↓ Excel</Btn>}
+         {perm.canSeePrice&&<Btn variant="secondary" onClick={onExport} size="sm">↓ Excel</Btn>}
+          {perm.canAdd&&<Btn variant="secondary" onClick={()=>setShowImport(true)} size="sm">↑ Importa Excel</Btn>}
           {perm.canAdd&&<Btn onClick={onAdd} size="sm">+ Aggiungi voce</Btn>}
         </div>
       </div>
@@ -1041,6 +1326,7 @@ function AbacoTable({project,role,supplierName,onEdit,onDelete,onAdd,onExport,fi
           </table>
         </div>
       </Card>
+   {showImport&&<ExcelImportWizard project={project} onImport={imported=>{onImport(imported);setShowImport(false);}} onClose={()=>setShowImport(false)}/>}
     </div>
   );
 }
@@ -1471,9 +1757,10 @@ function App(){
         {/* Main content */}
         <main style={{flex:1,padding:"24px 28px",overflow:"auto"}}>
           {view==="dashboard" &&<Dashboard project={project} role={role}/>}
-          {view==="abaco"     &&<AbacoTable project={project} role={role} supplierName={supplierName}
+         {view==="abaco"     &&<AbacoTable project={project} role={role} supplierName={supplierName}
             onEdit={item=>setModal(item)} onDelete={perm.canDelete?deleteItem:null}
             onAdd={perm.canAdd?()=>setModal({}):null} onExport={exportExcel}
+            onImport={imported=>updateProject({...project,items:[...project.items,...imported]})}
             filters={filters} setFilters={setFilters}/>}
           {view==="zone"      &&<ZoneView project={project} role={role}/>}
           {view==="portal"    &&<PortaleFornitore project={project} supplierName={supplierName} onEdit={(item)=>setModal(item)}/>}
