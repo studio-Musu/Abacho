@@ -877,26 +877,33 @@ function AbacoTable({project,role,supplierName,onEdit,onDelete,onAdd,onExport,fi
   const {items,zones,categories,floors}=project;
   const perm=ROLES[role];
   const [confirmDel,setConfirmDel]=useState(null);
+  const [filterFloor,    setFilterFloor]    = useState("");
+  const [filterAmbiente, setFilterAmbiente] = useState("");
+  const [filterSupplier, setFilterSupplier] = useState("");
   const {search,filterZone,filterCat,filterStatus}=filters;
 
-  // Supplier sees ONLY their items
   const baseItems=perm.canOffer&&supplierName
     ? items.filter(i=>i.referenceSupplier?.toLowerCase()===supplierName.toLowerCase())
     : items;
 
-  const filteredItems = useMemo(() => items.filter(i => {
-    if(filterFloor    && i.floorId   !== filterFloor)    return false;
-    if(filterZone     && i.zoneId    !== filterZone)     return false;
-    if(filterAmbiente && i.ambiente  !== filterAmbiente) return false;
-    if(filterSupplier && i.referenceSupplier !== filterSupplier) return false;
-    if(filterCat      && i.catId     !== filterCat)      return false;
-    if(filterStatus   && i.status    !== filterStatus)   return false;
-    if(search){const q=search.toLowerCase();return (i.code||"").toLowerCase().includes(q)||(i.description||"").toLowerCase().includes(q)||(i.referenceSupplier||"").toLowerCase().includes(q)||(i.ambiente||"").toLowerCase().includes(q);}
+  const filtered = useMemo(() => baseItems.filter(i => {
+    if(filterFloor    && i.floorId            !== filterFloor)    return false;
+    if(filterZone     && i.zoneId             !== filterZone)     return false;
+    if(filterAmbiente && i.ambiente           !== filterAmbiente) return false;
+    if(filterSupplier && i.referenceSupplier  !== filterSupplier) return false;
+    if(filterCat      && i.catId              !== filterCat)      return false;
+    if(filterStatus   && i.status             !== filterStatus)   return false;
+    if(search){const q=search.toLowerCase();return(i.code||"").toLowerCase().includes(q)||(i.description||"").toLowerCase().includes(q)||(i.referenceSupplier||"").toLowerCase().includes(q)||(i.ambiente||"").toLowerCase().includes(q);}
     return true;
-  });
+  }),[baseItems,filterFloor,filterZone,filterAmbiente,filterSupplier,filterCat,filterStatus,search]);
 
   const grandTotal=perm.canSeePrice?filtered.reduce((s,i)=>s+getTotal(i),0):null;
-  const af=[filterZone,filterCat,filterStatus].filter(Boolean).length;
+  const activeFilters=[filterZone,filterCat,filterStatus,filterFloor,filterAmbiente,filterSupplier].filter(Boolean).length;
+
+  const resetFilters=()=>{
+    setFilters({search:"",filterZone:"",filterCat:"",filterStatus:""});
+    setFilterFloor(""); setFilterAmbiente(""); setFilterSupplier("");
+  };
 
   return (
     <div>
@@ -916,16 +923,38 @@ function AbacoTable({project,role,supplierName,onEdit,onDelete,onAdd,onExport,fi
       <Card style={{padding:"12px 14px",marginBottom:14,display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
         <input value={search} onChange={e=>setFilters(f=>({...f,search:e.target.value}))} placeholder="🔍  Cerca codice, descrizione, fornitore..."
           style={{flex:1,minWidth:180,border:`1.5px solid ${C.border}`,borderRadius:8,padding:"7px 11px",background:"#F8F4EF",color:C.text,fontSize:13,fontFamily:"inherit",outline:"none"}}/>
+        <Sel value={filterFloor} onChange={setFilterFloor} style={{width:"auto"}}>
+          <option value="">Tutti i piani</option>
+          {[...new Set(items.map(i=>i.floorId).filter(Boolean))].map(id=>{
+            const f=floors.find(x=>x.id===id)||DEFAULT_FLOORS.find(x=>x.id===id);
+            return <option key={id} value={id}>{f?.name||id}</option>;
+          })}
+        </Sel>
         <Sel value={filterZone} onChange={v=>setFilters(f=>({...f,filterZone:v}))} style={{width:"auto"}}>
-          <option value="">Tutte le zone</option>{zones.map(z=><option key={z.id} value={z.id}>{z.name}</option>)}
+          <option value="">Tutte le zone</option>
+          {zones.map(z=><option key={z.id} value={z.id}>{z.name}</option>)}
+        </Sel>
+        <Sel value={filterAmbiente} onChange={setFilterAmbiente} style={{width:"auto"}}>
+          <option value="">Tutti gli ambienti</option>
+          {[...new Set(items.filter(i=>!filterZone||i.zoneId===filterZone).map(i=>i.ambiente).filter(Boolean))].map(a=>(
+            <option key={a} value={a}>{a}</option>
+          ))}
+        </Sel>
+        <Sel value={filterSupplier} onChange={setFilterSupplier} style={{width:"auto"}}>
+          <option value="">Tutti i fornitori</option>
+          {[...new Set(items.map(i=>i.referenceSupplier).filter(Boolean))].sort().map(s=>(
+            <option key={s} value={s}>{s}</option>
+          ))}
         </Sel>
         <Sel value={filterCat} onChange={v=>setFilters(f=>({...f,filterCat:v}))} style={{width:"auto"}}>
-          <option value="">Tutte le categorie</option>{categories.map(c=><option key={c.id} value={c.id}>{c.id} – {c.name}</option>)}
+          <option value="">Tutte le categorie</option>
+          {categories.map(c=><option key={c.id} value={c.id}>{c.id} – {c.name}</option>)}
         </Sel>
         <Sel value={filterStatus} onChange={v=>setFilters(f=>({...f,filterStatus:v}))} style={{width:"auto"}}>
-          <option value="">Tutti gli stati</option>{Object.entries(STATUS).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}
+          <option value="">Tutti gli stati</option>
+          {Object.entries(STATUS).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}
         </Sel>
-        {af>0&&<Btn variant="ghost" size="sm" onClick={()=>setFilters({search:"",filterZone:"",filterCat:"",filterStatus:""})}>✕ Pulisci ({af})</Btn>}
+        {activeFilters>0&&<Btn variant="ghost" size="sm" onClick={resetFilters}>✕ Pulisci ({activeFilters})</Btn>}
       </Card>
 
       <Card style={{overflow:"hidden"}}>
