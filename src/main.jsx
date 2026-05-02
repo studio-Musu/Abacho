@@ -884,10 +884,13 @@ function AbacoTable({project,role,supplierName,onEdit,onDelete,onAdd,onExport,fi
     ? items.filter(i=>i.referenceSupplier?.toLowerCase()===supplierName.toLowerCase())
     : items;
 
-  const filtered=baseItems.filter(i=>{
-    if(filterZone   && i.zoneId !==filterZone)  return false;
-    if(filterCat    && i.catId  !==filterCat)   return false;
-    if(filterStatus && i.status !==filterStatus) return false;
+  const filteredItems = useMemo(() => items.filter(i => {
+    if(filterFloor    && i.floorId   !== filterFloor)    return false;
+    if(filterZone     && i.zoneId    !== filterZone)     return false;
+    if(filterAmbiente && i.ambiente  !== filterAmbiente) return false;
+    if(filterSupplier && i.referenceSupplier !== filterSupplier) return false;
+    if(filterCat      && i.catId     !== filterCat)      return false;
+    if(filterStatus   && i.status    !== filterStatus)   return false;
     if(search){const q=search.toLowerCase();return (i.code||"").toLowerCase().includes(q)||(i.description||"").toLowerCase().includes(q)||(i.referenceSupplier||"").toLowerCase().includes(q)||(i.ambiente||"").toLowerCase().includes(q);}
     return true;
   });
