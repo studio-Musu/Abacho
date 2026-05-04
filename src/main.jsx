@@ -62,7 +62,8 @@ const FIELD_ALIASES={
   webLink:          ["link","url","sito","web","scheda","link prodotto","scheda prodotto","collegamento"],
   qty:              ["quantità","qty","q.tà","quantita","qta","quantity","num","numero","n."],
   unit:             ["u.m.","um","unità","unita","unit","misura","udm","unità di misura"],
-  unitPrice:        ["prezzo unit","prezzo unitario","prezzo un.","costo unitario","costo unit","price","unit price","prezzo","costo","p.u."],
+  unitPriceInstall: ["posa in opera","prezzo posa","costo posa","prezzo installazione","costo installazione","installazione","montaggio","manodopera","labor","installation","posa"],
+  unitPrice:        ["prezzo fornitura","costo fornitura","prezzo unitario","costo unitario","prezzo unit","prezzo un.","costo unit","unit price","fornitura","price","prezzo","costo","p.u."],
   notes:            ["note","notes","annotazioni","commenti","specifiche","descrizione tecnica","osservazioni"],
   status:           ["stato","status","avanzamento","fase"],
   zoneId:           ["zona","zone","area","settore"],
@@ -71,12 +72,23 @@ const FIELD_ALIASES={
   catId:            ["categoria","cat","category","tipologia","tipo"],
   code:             ["codice abaco","cod abaco","codice voce","code","id voce","riferimento"],
 };
+const OFFER_HEADER_RX=/^\s*(?:offerta|preventivo|quotazione|offer|quote|quotation)\b\s*[\-:–]?\s*(.*?)\s*$/i;
+const detectOfferHeader=h=>{
+  const m=String(h||"").match(OFFER_HEADER_RX);
+  if(!m)return null;
+  const supplier=(m[1]||"").trim();
+  return supplier||String(h).trim();
+};
 const autoMatchField=h=>{
   const n=String(h||"").toLowerCase().trim().replace(/\s+/g," ");
+  if(!n)return null;
+  let best=null,bestLen=0;
   for(const[field,aliases]of Object.entries(FIELD_ALIASES)){
-    if(aliases.some(a=>n===a||n.includes(a)))return field;
+    for(const a of aliases){
+      if((n===a||n.includes(a))&&a.length>bestLen){best=field;bestLen=a.length;}
+    }
   }
-  return null;
+  return best;
 };
 const statusFromStr=s=>{
   const v=String(s||"").toLowerCase();
@@ -93,7 +105,8 @@ const statusFromStr=s=>{
 // ═══════════════════════════════════════════════════════════════════════
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7);
 const fmt = n => (n!=null&&n!=="") ? `€\u00A0${Number(n).toLocaleString("it-IT")}` : "—";
-const getTotal = i => (i.qty||0)*(i.unitPrice||0);
+const getTotal = i => (i.qty||0)*((i.unitPrice||0)+(i.unitPriceInstall||0));
+const normDesc = s => String(s||"").toLowerCase().trim().replace(/\s+/g," ");
 const genCode = (zoneId,catId,items) => {
   const pfx=`TAO-${zoneId}-${catId}`;
   const n=items.filter(i=>i.code?.startsWith(pfx)).length;
@@ -628,15 +641,19 @@ function SchedaTab({form,setForm,project,isNew,perm}){
       </div>
 
       {/* Q.tà + Prezzo (only if canSeePrice OR new item by architect) */}
-      {perm.canSeePrice&&<div style={{display:"grid",gridTemplateColumns:"1fr 80px 1fr",gap:10}}>
+      {perm.canSeePrice&&<div style={{display:"grid",gridTemplateColumns:"1fr 80px 1fr 1fr",gap:10}}>
         <div><Lbl>Quantità</Lbl>
           {readOnly?<div style={{fontSize:13,fontFamily:"'DM Mono',monospace",padding:"6px 0"}}>{form.qty} {form.unit}</div>:
           <Inp value={form.qty} onChange={v=>set("qty",v)} placeholder="0" style={{textAlign:"right"}}/>}
         </div>
         {!readOnly&&<div><Lbl>U.M.</Lbl><Sel value={form.unit} onChange={v=>set("unit",v)}>{UNITS.map(u=><option key={u}>{u}</option>)}</Sel></div>}
-        <div><Lbl>Prezzo unitario (€)</Lbl>
+        <div><Lbl>Prezzo fornitura (€)</Lbl>
           {readOnly?<div style={{fontSize:13,fontFamily:"'DM Mono',monospace",padding:"6px 0"}}>{fmt(form.unitPrice)}</div>:
           <Inp value={form.unitPrice} onChange={v=>set("unitPrice",v)} placeholder="0" style={{textAlign:"right"}}/>}
+        </div>
+        <div><Lbl>Prezzo posa (€)</Lbl>
+          {readOnly?<div style={{fontSize:13,fontFamily:"'DM Mono',monospace",padding:"6px 0"}}>{fmt(form.unitPriceInstall)}</div>:
+          <Inp value={form.unitPriceInstall||""} onChange={v=>set("unitPriceInstall",v)} placeholder="0" style={{textAlign:"right"}}/>}
         </div>
       </div>}
 
@@ -649,11 +666,29 @@ function SchedaTab({form,setForm,project,isNew,perm}){
       </div>}
 
       {/* Totale */}
-      {perm.canSeePrice&&!readOnly&&(form.qty&&form.unitPrice)?
-        <div style={{background:"#FFF8F0",border:`1px solid #F0DCC8`,borderRadius:8,padding:"10px 14px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-          <span style={{fontSize:12,color:C.muted}}>Totale stimato</span>
-          <span style={{fontFamily:"'Cormorant Garamond',serif",fontSize:20,fontWeight:600,color:C.accent}}>{fmt(Number(form.qty)*Number(form.unitPrice))}</span>
+      {perm.canSeePrice&&!readOnly&&form.qty&&(Number(form.unitPrice)||Number(form.unitPriceInstall))?
+        <div style={{background:"#FFF8F0",border:`1px solid #F0DCC8`,borderRadius:8,padding:"10px 14px",display:"flex",flexDirection:"column",gap:4}}>
+          {Number(form.unitPrice)>0&&<div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:C.muted}}><span>Fornitura ({form.qty} × {fmt(form.unitPrice)})</span><span style={{fontFamily:"'DM Mono',monospace"}}>{fmt(Number(form.qty)*Number(form.unitPrice))}</span></div>}
+          {Number(form.unitPriceInstall)>0&&<div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:C.muted}}><span>Posa ({form.qty} × {fmt(form.unitPriceInstall)})</span><span style={{fontFamily:"'DM Mono',monospace"}}>{fmt(Number(form.qty)*Number(form.unitPriceInstall))}</span></div>}
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",borderTop:`1px solid ${C.border}`,paddingTop:5,marginTop:2}}>
+            <span style={{fontSize:12,color:C.muted}}>Totale stimato</span>
+            <span style={{fontFamily:"'Cormorant Garamond',serif",fontSize:20,fontWeight:600,color:C.accent}}>{fmt(Number(form.qty)*((Number(form.unitPrice)||0)+(Number(form.unitPriceInstall)||0)))}</span>
+          </div>
         </div>:null}
+
+      {/* Campi personalizzati */}
+      {form.customFields&&Object.keys(form.customFields).length>0&&<div>
+        <Lbl>Campi personalizzati</Lbl>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+          {Object.entries(form.customFields).map(([k,v])=>(
+            <div key={k} style={{display:"flex",flexDirection:"column",gap:3}}>
+              <span style={{fontSize:11,color:C.muted,fontFamily:"'DM Mono',monospace"}}>★ {k}</span>
+              {readOnly?<div style={{fontSize:13,padding:"4px 0"}}>{v||"—"}</div>:
+              <Inp value={v||""} onChange={nv=>set("customFields",{...form.customFields,[k]:nv})}/>}
+            </div>
+          ))}
+        </div>
+      </div>}
 
       {/* Stato */}
       {perm.canEdit&&<div><Lbl>Stato</Lbl>
@@ -854,12 +889,12 @@ function ItemModal({item,project,role,supplierName,onSave,onClose}){
   const [form,setForm]=useState({
     zoneId:project.zones[0]?.id||"",ambiente:"",catId:project.categories[0]?.id||"",
     description:"",referenceSupplier:"",supplierCode:"",webLink:"",qty:"",unit:"pz",
-    unitPrice:"",status:"da_definire",notes:"",image:null,floorId:"",offers:[],comments:[],...item
+    unitPrice:"",unitPriceInstall:"",status:"da_definire",notes:"",image:null,floorId:"",offers:[],comments:[],customFields:{},...item
   });
   const handleSave=()=>{
     if(!form.description.trim())return;
     const code=form.code||genCode(form.zoneId,form.catId,project.items);
-    onSave({...form,code,qty:Number(form.qty)||0,unitPrice:Number(form.unitPrice)||0});
+    onSave({...form,code,qty:Number(form.qty)||0,unitPrice:Number(form.unitPrice)||0,unitPriceInstall:Number(form.unitPriceInstall)||0});
   };
   const tabs=[
     {id:"scheda",  icon:"📋",label:"Scheda"},
@@ -923,8 +958,8 @@ function ExcelImportWizard({project,onImport,onClose}){
     {key:"description",label:"Descrizione"},{key:"referenceSupplier",label:"Fornitore"},
     {key:"supplierCode",label:"Codice fornitore"},{key:"webLink",label:"Link prodotto"},
     {key:"qty",label:"Quantità"},{key:"unit",label:"Unità misura"},
-    {key:"unitPrice",label:"Prezzo unitario"},{key:"notes",label:"Note"},
-    {key:"status",label:"Stato"},{key:"zoneId",label:"Zona"},
+    {key:"unitPrice",label:"Prezzo fornitura"},{key:"unitPriceInstall",label:"Prezzo posa in opera"},
+    {key:"notes",label:"Note"},{key:"status",label:"Stato"},{key:"zoneId",label:"Zona"},
     {key:"ambiente",label:"Ambiente"},{key:"floorId",label:"Piano"},
     {key:"catId",label:"Categoria"},{key:"code",label:"Codice abaco"},
   ];
@@ -941,9 +976,16 @@ function ExcelImportWizard({project,onImport,onClose}){
     setHeaders(hdrs);setRawRows(rows);
     const autoMap={};const unknown=[];
     hdrs.forEach(h=>{
+      const offerSupplier=detectOfferHeader(h);
+      if(offerSupplier){
+        autoMap[h]={action:"offer",customLabel:offerSupplier};
+        unknown.push(h);
+        return;
+      }
       const match=autoMatchField(h);
-      if(match)autoMap[h]={action:"map",target:match};
-      else unknown.push(h);
+      if(match){autoMap[h]={action:"map",target:match};return;}
+      autoMap[h]={action:"custom",customLabel:h};
+      unknown.push(h);
     });
     setMapping(autoMap);setUnknownHeaders(unknown);
     setStep(unknown.length>0?"mapping":"preview");
@@ -954,7 +996,11 @@ function ExcelImportWizard({project,onImport,onClose}){
     headers.forEach((h,i)=>{
       const m=mapping[h];if(!m||m.action==="skip")return;
       const val=String(row[i]||"").trim();
-      if(m.action==="map")obj[m.target]=val;
+      if(m.action==="map"){
+        const fld=KNOWN_FIELDS.find(f=>f.key===m.target);
+        obj[fld?.label||m.target]=val;
+      }
+      else if(m.action==="offer"&&m.customLabel)obj[`💰 ${m.customLabel}`]=val;
       else if(m.action==="custom"&&m.customLabel)obj[`★ ${m.customLabel}`]=val;
     });
     return obj;
@@ -964,33 +1010,45 @@ function ExcelImportWizard({project,onImport,onClose}){
 
   const doImport=async()=>{
     setImporting(true);
+    const customLabels=new Set();
     const imported=rawRows.map(row=>{
-      const obj={id:uid(),offers:[],comments:[],image:null,created:new Date().toISOString().slice(0,10)};
+      const obj={id:uid(),offers:[],comments:[],image:null,customFields:{},created:new Date().toISOString().slice(0,10)};
       headers.forEach((h,i)=>{
         const m=mapping[h];if(!m||m.action==="skip")return;
         const val=String(row[i]||"").trim();
         if(m.action==="map"){
-          if(m.target==="qty"||m.target==="unitPrice")obj[m.target]=parseFloat(val.replace(",","."))||0;
+          if(m.target==="qty"||m.target==="unitPrice"||m.target==="unitPriceInstall")obj[m.target]=parseFloat(val.replace(",","."))||0;
           else if(m.target==="status")obj[m.target]=statusFromStr(val);
           else obj[m.target]=val;
-        }else if(m.action==="custom"&&m.customLabel){
-          obj[`_custom_${m.customLabel.replace(/\s+/g,"_")}`]=val;
+        }else if(m.action==="offer"&&m.customLabel){
+          const price=parseFloat(val.replace(",","."));
+          if(price>0){
+            obj.offers.push({
+              id:uid(),supplierName:m.customLabel,unitPrice:price,
+              totalNote:"Importato da Excel",attachmentName:null,attachmentKey:null,attachmentType:null,
+              submittedAt:new Date().toISOString(),isSelected:false,
+            });
+          }
+        }else if(m.action==="custom"&&m.customLabel&&val){
+          obj.customFields[m.customLabel]=val;
+          customLabels.add(m.customLabel);
         }
       });
       if(!obj.description&&!obj.code)return null;
       if(!obj.status)obj.status="da_definire";
       if(!obj.unit)obj.unit="pz";
       if(!obj.code)obj.code=genCode(obj.zoneId||"XX",obj.catId||"XX",[]);
+      if(Object.keys(obj.customFields).length===0)delete obj.customFields;
       return obj;
     }).filter(Boolean);
-    setResult({count:imported.length});
+    setResult({count:imported.length,customFields:[...customLabels]});
     onImport(imported);
     setStep("done");setImporting(false);
   };
 
   const canProceed=!unknownHeaders.some(h=>{
     const m=mapping[h];
-    return(m?.action==="map"&&!m?.target)||(m?.action==="custom"&&!m?.customLabel);
+    return(m?.action==="map"&&!m?.target)||(m?.action==="custom"&&!m?.customLabel)||(m?.action==="offer"&&!m?.customLabel);
   });
 
   const stepLabels=["upload","mapping","preview","done"];
@@ -1073,7 +1131,7 @@ function ExcelImportWizard({project,onImport,onClose}){
                       </div>
                       <div style={{flex:1,display:"flex",flexDirection:"column",gap:6}}>
                         <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-                          {[["map","Abbina a campo"],["custom","Campo personalizzato"],["skip","Ignora"]].map(([act,lbl])=>(
+                          {[["map","Abbina a campo"],["offer","Offerta da fornitore"],["custom","Campo personalizzato"],["skip","Ignora"]].map(([act,lbl])=>(
                             <label key={act} style={{display:"flex",alignItems:"center",gap:4,cursor:"pointer",fontSize:12,padding:"4px 10px",borderRadius:99,border:`1px solid ${m.action===act?"#3B82F6":C.border}`,background:m.action===act?"#EFF6FF":"#F8F4EF",color:m.action===act?"#3B82F6":C.muted,fontWeight:m.action===act?600:400}}>
                               <input type="radio" checked={m.action===act} onChange={()=>setMapping(mp=>({...mp,[h]:{...m,action:act}}))} style={{display:"none"}}/>
                               {lbl}
@@ -1085,6 +1143,9 @@ function ExcelImportWizard({project,onImport,onClose}){
                             <option value="">— Seleziona campo —</option>
                             {KNOWN_FIELDS.map(f=><option key={f.key} value={f.key}>{f.label}</option>)}
                           </Sel>
+                        )}
+                        {m.action==="offer"&&(
+                          <Inp value={m.customLabel||""} onChange={v=>setMapping(mp=>({...mp,[h]:{...m,customLabel:v}}))} placeholder="Nome fornitore" style={{maxWidth:240}}/>
                         )}
                         {m.action==="custom"&&(
                           <Inp value={m.customLabel||h} onChange={v=>setMapping(mp=>({...mp,[h]:{...m,customLabel:v}}))} placeholder="Nome campo personalizzato" style={{maxWidth:240}}/>
@@ -1130,7 +1191,12 @@ function ExcelImportWizard({project,onImport,onClose}){
             <div style={{textAlign:"center",padding:"24px 0"}}>
               <div style={{fontSize:40,marginBottom:12}}>✅</div>
               <div style={{fontSize:16,fontWeight:600,color:C.text,marginBottom:6}}>{result.count} voci importate</div>
-              <div style={{fontSize:12,color:C.muted}}>Vai all'Abaco per completare i campi mancanti</div>
+              {result.customFields?.length>0&&(
+                <div style={{fontSize:12,color:C.muted,marginTop:8}}>
+                  Campi personalizzati creati: {result.customFields.map(c=>(<span key={c} style={{display:"inline-block",margin:"2px 3px",padding:"2px 8px",borderRadius:99,background:C.border,color:C.text,fontFamily:"'DM Mono',monospace",fontSize:11}}>★ {c}</span>))}
+                </div>
+              )}
+              <div style={{fontSize:12,color:C.muted,marginTop:8}}>Vai all'Abaco per completare i campi mancanti</div>
             </div>
           )}
         </div>
@@ -1693,13 +1759,38 @@ function App(){
     await saveIndex(updated);
   },[]);
 
-  const updateItem=useCallback(item=>updateProject({...project,items:project.items.map(i=>i.id===item.id?item:i)}),[project,updateProject]);
+  const updateItem=useCallback(item=>{
+    const prev=project.items.find(i=>i.id===item.id);
+    let updatedItems=project.items.map(i=>i.id===item.id?item:i);
+    if(prev){
+      const target=normDesc(item.description);
+      if(target){
+        const sync={};
+        if(prev.catId!==item.catId)sync.catId=item.catId;
+        if(Number(prev.unitPrice||0)!==Number(item.unitPrice||0))sync.unitPrice=item.unitPrice;
+        if(Number(prev.unitPriceInstall||0)!==Number(item.unitPriceInstall||0))sync.unitPriceInstall=item.unitPriceInstall;
+        const keys=Object.keys(sync);
+        if(keys.length>0){
+          const matches=updatedItems.filter(i=>i.id!==item.id&&normDesc(i.description)===target);
+          if(matches.length>0){
+            const labels={catId:"categoria",unitPrice:"prezzo fornitura",unitPriceInstall:"prezzo posa"};
+            const fieldList=keys.map(k=>labels[k]).join(", ");
+            if(window.confirm(`Trovate ${matches.length} altre voci con la stessa descrizione "${item.description}".\n\nAggiornare anche quelle (${fieldList})?`)){
+              updatedItems=updatedItems.map(i=>(i.id!==item.id&&normDesc(i.description)===target)?{...i,...sync}:i);
+            }
+          }
+        }
+      }
+    }
+    updateProject({...project,items:updatedItems});
+  },[project,updateProject]);
   const addItem=useCallback(item=>updateProject({...project,items:[...project.items,{...item,id:uid(),created:new Date().toISOString().slice(0,10)}]}),[project,updateProject]);
   const deleteItem=useCallback(id=>updateProject({...project,items:project.items.filter(i=>i.id!==id)}),[project,updateProject]);
 
   const exportExcel=useCallback(()=>{
     const perm=ROLES[role];
     const src=perm.canOffer&&supplierName?project.items.filter(i=>i.referenceSupplier?.toLowerCase()===supplierName.toLowerCase()):project.items;
+    const customKeys=[...new Set(src.flatMap(i=>Object.keys(i.customFields||{})))];
     const rows=src.map(i=>({
       "Codice":i.code||"","Descrizione":i.description||"",
       "Piano":project.floors.find(f=>f.id===i.floorId)?.name||"",
@@ -1708,10 +1799,11 @@ function App(){
       "Categoria":project.categories.find(c=>c.id===i.catId)?.name||i.catId,
       "Fornitore ref.":i.referenceSupplier||"","Cod. Fornitore":i.supplierCode||"",
       "Link prodotto":i.webLink||"","Quantità":i.qty||0,"U.M.":i.unit||"",
-      ...(perm.canSeePrice?{"Prezzo unit. (€)":i.unitPrice||0,"Totale (€)":getTotal(i)}:{}),
+      ...(perm.canSeePrice?{"Prezzo fornitura (€)":i.unitPrice||0,"Prezzo posa (€)":i.unitPriceInstall||0,"Totale (€)":getTotal(i)}:{}),
       "N. Offerte":i.offers?.length||0,
       ...(perm.canSeePrice?{"Offerta sel.":i.offers?.find(o=>o.isSelected)?.supplierName||"","Prezzo migliore":i.offers?.length?Math.min(...i.offers.map(o=>o.unitPrice)):""}:{}),
       "Stato":STATUS[i.status]?.label||i.status,"Note":i.notes||"","Creato":i.created||"",
+      ...Object.fromEntries(customKeys.map(k=>[`★ ${k}`,i.customFields?.[k]||""])),
     }));
     const ws=XLSX.utils.json_to_sheet(rows);
     const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,"Abaco");
