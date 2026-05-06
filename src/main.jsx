@@ -162,26 +162,19 @@ function dlFile(name,type,b64){
 // STORAGE (Supabase) — sincronizzazione cloud cross-device
 // ═══════════════════════════════════════════════════════════════════════
 function makeProjectData(){
-  const SAMPLE_ITEMS=[
-    {id:uid(),code:"TAO-LBB-PAV-001",floorId:"PT",  description:"Pavimento in pietra lavica lucida 60×60",          zoneId:"LBB",ambiente:"Ingresso principale",catId:"PAV",referenceSupplier:"Ceramiche Siciliane srl",supplierCode:"PL6060-N",webLink:"https://www.ceramiche.it",qty:85, unit:"mq",unitPrice:180,  status:"approvato",     notes:"Colore nero vulcano. Finitura levigata.",     image:null,offers:[],comments:[],created:new Date().toISOString().slice(0,10)},
-    {id:uid(),code:"TAO-LBB-ILL-001",floorId:"PT",  description:"Lampadario sospensione ottone spazzolato Ø120",    zoneId:"LBB",ambiente:"Reception",          catId:"ILL",referenceSupplier:"Apparatus Studio",      supplierCode:"APP-ORB-120", webLink:"https://www.apparatusstudio.com",qty:1,  unit:"pz",unitPrice:4800, status:"in_valutazione",notes:"Verificare altezza soffitto prima dell'ordine.", image:null,offers:[],comments:[],created:new Date().toISOString().slice(0,10)},
-    {id:uid(),code:"TAO-CAM-PAV-001",floorId:"P1",  description:"Parquet rovere europeo spazzolato 15×120",         zoneId:"CAM",ambiente:"Camera Standard",    catId:"PAV",referenceSupplier:"Listone Giordano",      supplierCode:"LG-ROV-15",  webLink:"https://www.listonegiordano.com",qty:320,unit:"mq",unitPrice:95,   status:"ordinato",      notes:"Finitura olio naturale. Posa a correre.",     image:null,offers:[{id:uid(),supplierName:"Listone Giordano",unitPrice:95,totalNote:"Trasporto incluso. Consegna 3 sett.",attachmentName:null,attachmentKey:null,attachmentType:null,submittedAt:new Date().toISOString(),isSelected:true}],comments:[],created:new Date().toISOString().slice(0,10)},
-    {id:uid(),code:"TAO-SPA-ILL-001",floorId:"PI",  description:"Strip LED RGB dimmerabile IP67",                   zoneId:"SPA",ambiente:"Piscina interna",    catId:"ILL",referenceSupplier:"Artemide",             supplierCode:"ART-RGB-67", webLink:"https://www.artemide.com",qty:85, unit:"ml",unitPrice:65,   status:"consegnato",    notes:"IP67 bordo vasca. Controller DALI.",          image:null,offers:[],comments:[],created:new Date().toISOString().slice(0,10)},
-    {id:uid(),code:"TAO-RTF-ARM-001",floorId:"RTF", description:"Poltroncina outdoor teak e corda nautica",         zoneId:"RTF",ambiente:"Lounge",             catId:"ARM",referenceSupplier:"Paola Lenti",           supplierCode:"PL-ROPE-TK", webLink:"https://www.paolalenti.it",qty:24, unit:"pz",unitPrice:1200, status:"da_definire",   notes:"Colore sabbia. Verificare UV.",               image:null,offers:[],comments:[],created:new Date().toISOString().slice(0,10)},
-  ];
   return {
     floors:[...DEFAULT_FLOORS],
     zones:[...DEFAULT_ZONES.map(z=>({...z,ambienti:[...z.ambienti]}))],
     categories:[...DEFAULT_CATS.map(c=>({...c}))],
-    items:SAMPLE_ITEMS, created:new Date().toISOString().slice(0,10),
+    items:[], created:new Date().toISOString().slice(0,10),
   };
 }
 
 async function listMyProjects(){
-  if(!sb)return[];
+  if(!sb)return{projects:[],error:"Supabase non configurato"};
   const{data,error}=await sb.from("projects").select("id,name,created_at").order("created_at",{ascending:false});
-  if(error){console.warn("listMyProjects:",error.message);return[];}
-  return(data||[]).map(p=>({id:p.id,name:p.name,created:(p.created_at||"").slice(0,10)}));
+  if(error){console.warn("listMyProjects:",error);return{projects:[],error:error.message};}
+  return{projects:(data||[]).map(p=>({id:p.id,name:p.name,created:(p.created_at||"").slice(0,10)})),error:null};
 }
 
 async function loadProject(id){
@@ -195,7 +188,7 @@ async function saveProject(proj){
   if(!sb)return;
   const{id,name,owner_id,...rest}=proj;
   const{error}=await sb.from("projects").update({name,data:rest}).eq("id",id);
-  if(error)console.warn("saveProject:",error.message);
+  if(error){console.error("saveProject failed:",error);throw error;}
 }
 
 async function createProject(name){
@@ -204,7 +197,14 @@ async function createProject(name){
   if(!user)throw new Error("Non autenticato");
   const seed=makeProjectData();
   const{data,error}=await sb.from("projects").insert({name,data:seed,owner_id:user.id}).select().single();
-  if(error)throw error;
+  if(error){console.error("createProject insert failed:",error);throw error;}
+  // Verify membership row was created by the trigger; if not (es. trigger SQL non eseguito), aggiungilo manualmente
+  const{data:mem}=await sb.from("project_members").select("role").eq("project_id",data.id).eq("user_id",user.id).maybeSingle();
+  if(!mem){
+    console.warn("Trigger on_project_created non ha aggiunto la membership; aggiungo manualmente");
+    const{error:mErr}=await sb.from("project_members").insert({project_id:data.id,user_id:user.id,role:"architetto"});
+    if(mErr)console.error("Fallback project_members insert failed:",mErr);
+  }
   return{id:data.id,name:data.name,owner_id:data.owner_id,...(data.data||{})};
 }
 
@@ -367,15 +367,20 @@ function LoginScreen({error}){
 // ═══════════════════════════════════════════════════════════════════════
 function ProjectSelector({user,onSelect,onSignOut}){
   const [projects,setProjects]=useState(null);
+  const [loadError,setLoadError]=useState(null);
   const [creating,setCreating]=useState(false);
   const [newName,setNewName]=useState("");
   const [loading,setLoading]=useState(false);
   const [hov,setHov]=useState(null);
 
   const refresh=useCallback(async()=>{
-    await acceptPendingInvites();
-    const list=await listMyProjects();
-    setProjects(list);
+    setProjects(null);setLoadError(null);
+    try{
+      const accepted=await acceptPendingInvites();
+      if(accepted>0)console.info(`Accettati ${accepted} inviti pendenti`);
+    }catch(e){console.warn("acceptPendingInvites:",e);}
+    const{projects:list,error}=await listMyProjects();
+    setProjects(list);setLoadError(error);
   },[]);
 
   useEffect(()=>{refresh();},[refresh]);
@@ -410,6 +415,12 @@ function ProjectSelector({user,onSelect,onSignOut}){
       </div>
 
       <div style={{width:520,padding:"0 24px"}}>
+        {/* Toolbar */}
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,fontSize:11,color:C.muted}}>
+          <span>{projects.length} {projects.length===1?"progetto":"progetti"}</span>
+          <button onClick={refresh} disabled={loading} style={{background:"none",border:"none",color:C.accent,cursor:"pointer",fontSize:11,fontFamily:"inherit",textDecoration:"underline"}}>↻ Ricarica</button>
+        </div>
+        {loadError&&<div style={{padding:"10px 14px",background:"#FEE2E2",borderRadius:8,fontSize:12,color:"#DC2626",marginBottom:12,fontFamily:"'DM Mono',monospace"}}>⚠ {loadError}</div>}
         {/* Project list */}
         {projects.length>0&&<div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:20}}>
           {projects.map(p=>(
@@ -2022,8 +2033,14 @@ function App(){
     return()=>{sb.removeChannel(ch);};
   },[project?.id]);
 
+  const [saveError,setSaveError]=useState(null);
   const updateProject=useCallback(async upd=>{
-    setProject(upd); await saveProject(upd);
+    setProject(upd);
+    try{await saveProject(upd);setSaveError(null);}
+    catch(e){
+      setSaveError(e.message||"Errore di salvataggio");
+      setTimeout(()=>setSaveError(null),8000);
+    }
   },[]);
 
   const renameIndex=useCallback(async()=>{},[]); // no-op: nome è già su projects.name e si aggiorna via saveProject
@@ -2111,6 +2128,9 @@ function App(){
             <span style={{fontSize:13,color:C.muted}}>{{dashboard:"Panoramica",abaco:"Abaco Forniture",zone:"Vista per Zone",portal:"Portale Fornitore",settings:"Impostazioni"}[view]}</span>
           </div>
           <div style={{display:"flex",alignItems:"center",gap:10}}>
+            {saveError&&<div style={{display:"flex",alignItems:"center",gap:5,background:"#FEE2E2",padding:"4px 10px",borderRadius:99}}>
+              <span style={{fontSize:12,color:"#DC2626",fontWeight:500}}>⚠ Salvataggio fallito: {saveError}</span>
+            </div>}
             {pendingOffers>0&&role!=="fornitore"&&<div style={{display:"flex",alignItems:"center",gap:5,background:"#FEF3C7",padding:"4px 10px",borderRadius:99}}>
               <span style={{width:6,height:6,borderRadius:"50%",background:"#F59E0B",display:"inline-block"}}/>
               <span style={{fontSize:12,color:"#B45309",fontWeight:500}}>{pendingOffers} offerte da valutare</span>
