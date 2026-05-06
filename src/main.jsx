@@ -1,6 +1,16 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import ReactDOM from 'react-dom/client'
 import * as XLSX from "xlsx";
+import { createClient } from "@supabase/supabase-js";
+
+// ═══════════════════════════════════════════════════════════════════════
+// SUPABASE CLIENT
+// ═══════════════════════════════════════════════════════════════════════
+const SB_URL = import.meta.env.VITE_SUPABASE_URL;
+const SB_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
+const sb = (SB_URL && SB_KEY) ? createClient(SB_URL, SB_KEY, {
+  auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
+}) : null;
 
 // ═══════════════════════════════════════════════════════════════════════
 // DEFAULT DATA
@@ -149,24 +159,9 @@ function dlFile(name,type,b64){
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// STORAGE (shared = true → tutti gli utenti vedono gli stessi dati)
+// STORAGE (Supabase) — sincronizzazione cloud cross-device
 // ═══════════════════════════════════════════════════════════════════════
-const stGet=async(k,shared=true)=>{try{const r=await window.storage.get(k,shared);return r?r.value:null;}catch{return null;}};
-const stSet=async(k,v,shared=true)=>{try{await window.storage.set(k,v,shared);}catch(e){console.warn("storage:",e);}};
-const IDX_KEY="tao-v3-index";
-const projKey=id=>`tao-v3-proj-${id}`;
-const attKey=id=>`tao-v3-att-${id}`;
-
-async function loadIndex(){
-  const v=await stGet(IDX_KEY); try{return v?JSON.parse(v):[];}catch{return [];}
-}
-async function saveIndex(idx){ await stSet(IDX_KEY,JSON.stringify(idx)); }
-async function loadProject(id){
-  const v=await stGet(projKey(id)); try{return v?JSON.parse(v):null;}catch{return null;}
-}
-async function saveProject(proj){ await stSet(projKey(proj.id),JSON.stringify(proj)); }
-
-function makeProject(name="Nuovo Progetto"){
+function makeProjectData(){
   const SAMPLE_ITEMS=[
     {id:uid(),code:"TAO-LBB-PAV-001",floorId:"PT",  description:"Pavimento in pietra lavica lucida 60×60",          zoneId:"LBB",ambiente:"Ingresso principale",catId:"PAV",referenceSupplier:"Ceramiche Siciliane srl",supplierCode:"PL6060-N",webLink:"https://www.ceramiche.it",qty:85, unit:"mq",unitPrice:180,  status:"approvato",     notes:"Colore nero vulcano. Finitura levigata.",     image:null,offers:[],comments:[],created:new Date().toISOString().slice(0,10)},
     {id:uid(),code:"TAO-LBB-ILL-001",floorId:"PT",  description:"Lampadario sospensione ottone spazzolato Ø120",    zoneId:"LBB",ambiente:"Reception",          catId:"ILL",referenceSupplier:"Apparatus Studio",      supplierCode:"APP-ORB-120", webLink:"https://www.apparatusstudio.com",qty:1,  unit:"pz",unitPrice:4800, status:"in_valutazione",notes:"Verificare altezza soffitto prima dell'ordine.", image:null,offers:[],comments:[],created:new Date().toISOString().slice(0,10)},
@@ -175,11 +170,115 @@ function makeProject(name="Nuovo Progetto"){
     {id:uid(),code:"TAO-RTF-ARM-001",floorId:"RTF", description:"Poltroncina outdoor teak e corda nautica",         zoneId:"RTF",ambiente:"Lounge",             catId:"ARM",referenceSupplier:"Paola Lenti",           supplierCode:"PL-ROPE-TK", webLink:"https://www.paolalenti.it",qty:24, unit:"pz",unitPrice:1200, status:"da_definire",   notes:"Colore sabbia. Verificare UV.",               image:null,offers:[],comments:[],created:new Date().toISOString().slice(0,10)},
   ];
   return {
-    id:uid(), name, archPassword:"arch2024", clientPassword:"client2024",
-    floors:[...DEFAULT_FLOORS], zones:[...DEFAULT_ZONES.map(z=>({...z,ambienti:[...z.ambienti]}))],
+    floors:[...DEFAULT_FLOORS],
+    zones:[...DEFAULT_ZONES.map(z=>({...z,ambienti:[...z.ambienti]}))],
     categories:[...DEFAULT_CATS.map(c=>({...c}))],
     items:SAMPLE_ITEMS, created:new Date().toISOString().slice(0,10),
   };
+}
+
+async function listMyProjects(){
+  if(!sb)return[];
+  const{data,error}=await sb.from("projects").select("id,name,created_at").order("created_at",{ascending:false});
+  if(error){console.warn("listMyProjects:",error.message);return[];}
+  return(data||[]).map(p=>({id:p.id,name:p.name,created:(p.created_at||"").slice(0,10)}));
+}
+
+async function loadProject(id){
+  if(!sb)return null;
+  const{data,error}=await sb.from("projects").select("*").eq("id",id).single();
+  if(error||!data)return null;
+  return{id:data.id,name:data.name,owner_id:data.owner_id,...(data.data||{})};
+}
+
+async function saveProject(proj){
+  if(!sb)return;
+  const{id,name,owner_id,...rest}=proj;
+  const{error}=await sb.from("projects").update({name,data:rest}).eq("id",id);
+  if(error)console.warn("saveProject:",error.message);
+}
+
+async function createProject(name){
+  if(!sb)throw new Error("Supabase non configurato");
+  const{data:{user}}=await sb.auth.getUser();
+  if(!user)throw new Error("Non autenticato");
+  const seed=makeProjectData();
+  const{data,error}=await sb.from("projects").insert({name,data:seed,owner_id:user.id}).select().single();
+  if(error)throw error;
+  return{id:data.id,name:data.name,owner_id:data.owner_id,...(data.data||{})};
+}
+
+async function deleteProjectRow(id){
+  if(!sb)return;
+  await sb.from("projects").delete().eq("id",id);
+}
+
+async function loadMyMembership(projectId){
+  if(!sb)return null;
+  const{data:{user}}=await sb.auth.getUser();
+  if(!user)return null;
+  const{data}=await sb.from("project_members").select("role,supplier_name").eq("project_id",projectId).eq("user_id",user.id).maybeSingle();
+  return data;
+}
+
+async function loadMembers(projectId){
+  if(!sb)return[];
+  const{data}=await sb.from("project_members")
+    .select("user_id,role,supplier_name,profiles:user_id(email,display_name,avatar_url)")
+    .eq("project_id",projectId);
+  return data||[];
+}
+
+async function loadInvites(projectId){
+  if(!sb)return[];
+  const{data}=await sb.from("project_invites")
+    .select("id,email,role,supplier_name,created_at")
+    .eq("project_id",projectId).is("accepted_at",null)
+    .order("created_at",{ascending:false});
+  return data||[];
+}
+
+async function inviteMember(projectId,email,role,supplierName){
+  if(!sb)throw new Error("Supabase non configurato");
+  const{data:{user}}=await sb.auth.getUser();
+  const cleanEmail=String(email||"").trim().toLowerCase();
+  if(!cleanEmail)throw new Error("Email mancante");
+  const{error}=await sb.from("project_invites").insert({
+    project_id:projectId,email:cleanEmail,role,
+    supplier_name:role==="fornitore"?(supplierName||null):null,
+    invited_by:user?.id||null,
+  });
+  if(error)throw error;
+}
+
+async function removeMember(projectId,userId){
+  if(!sb)return;
+  await sb.from("project_members").delete().eq("project_id",projectId).eq("user_id",userId);
+}
+
+async function cancelInvite(inviteId){
+  if(!sb)return;
+  await sb.from("project_invites").delete().eq("id",inviteId);
+}
+
+async function acceptPendingInvites(){
+  if(!sb)return 0;
+  const{data,error}=await sb.rpc("accept_my_invites");
+  if(error){console.warn("accept_my_invites:",error.message);return 0;}
+  return data||0;
+}
+
+async function signInWithGoogle(){
+  if(!sb)throw new Error("Supabase non configurato");
+  await sb.auth.signInWithOAuth({
+    provider:"google",
+    options:{redirectTo:window.location.origin}
+  });
+}
+
+async function signOut(){
+  if(!sb)return;
+  await sb.auth.signOut();
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -237,32 +336,66 @@ function Modal({children,onClose,width=500}){
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// LOGIN SCREEN
+// ═══════════════════════════════════════════════════════════════════════
+function LoginScreen({error}){
+  return (
+    <div style={{minHeight:"100vh",background:C.bg,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",fontFamily:"'DM Sans',sans-serif",backgroundImage:"radial-gradient(circle at 20% 50%,rgba(196,113,74,0.06),transparent 50%),radial-gradient(circle at 80% 20%,rgba(184,146,90,0.06),transparent 50%)"}}>
+      <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,600;1,400&family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+      <div style={{textAlign:"center",marginBottom:36}}>
+        <div style={{fontFamily:"'DM Mono',monospace",fontSize:11,letterSpacing:"0.25em",textTransform:"uppercase",color:C.gold,marginBottom:8}}>Abaco Forniture · v3</div>
+        <h1 style={{fontFamily:"'Cormorant Garamond',serif",fontSize:46,fontWeight:600,color:C.text,margin:0,lineHeight:1}}>Benvenuto</h1>
+        <div style={{width:48,height:2,background:`linear-gradient(90deg,${C.accent},${C.gold})`,margin:"16px auto 0",borderRadius:1}}/>
+        <div style={{fontSize:13,color:C.muted,marginTop:14,maxWidth:340}}>Accedi con il tuo account Google per accedere ai tuoi progetti — sincronizzati su tutti i dispositivi.</div>
+      </div>
+      <button onClick={()=>signInWithGoogle().catch(e=>alert(e.message))}
+        style={{display:"flex",alignItems:"center",gap:10,padding:"12px 24px",background:"#FFF",border:`1.5px solid ${C.border}`,borderRadius:10,cursor:"pointer",fontSize:14,fontFamily:"inherit",color:C.text,fontWeight:500,boxShadow:"0 2px 8px rgba(42,37,32,0.06)"}}>
+        <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.611 20.083H42V20H24v8h11.303c-1.649 4.657-6.08 8-11.303 8-6.627 0-12-5.373-12-12s5.373-12 12-12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4 12.955 4 4 12.955 4 24s8.955 20 20 20 20-8.955 20-20c0-1.341-.138-2.65-.389-3.917z"/><path fill="#FF3D00" d="M6.306 14.691l6.571 4.819C14.655 15.108 18.961 12 24 12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4 16.318 4 9.656 8.337 6.306 14.691z"/><path fill="#4CAF50" d="M24 44c5.166 0 9.86-1.977 13.409-5.192l-6.19-5.238A11.91 11.91 0 0 1 24 36c-5.202 0-9.619-3.317-11.283-7.946l-6.522 5.025C9.505 39.556 16.227 44 24 44z"/><path fill="#1976D2" d="M43.611 20.083H42V20H24v8h11.303a12.04 12.04 0 0 1-4.087 5.571l.003-.002 6.19 5.238C36.971 39.205 44 34 44 24c0-1.341-.138-2.65-.389-3.917z"/></svg>
+        Accedi con Google
+      </button>
+      {error&&<div style={{marginTop:16,fontSize:12,color:"#DC2626",maxWidth:340,textAlign:"center"}}>{error}</div>}
+      {!sb&&<div style={{marginTop:16,fontSize:12,color:"#DC2626",maxWidth:340,textAlign:"center",padding:"10px 14px",background:"#FEE2E2",borderRadius:8}}>⚠ Variabili VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY mancanti su Vercel. Configurare e ridistribuire.</div>}
+      <div style={{marginTop:36,fontSize:11,color:"#B0A89A",letterSpacing:"0.05em",maxWidth:340,textAlign:"center"}}>
+        Se sei stato invitato, fai login con la stessa email a cui è arrivato l'invito.
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // PROJECT SELECTOR
 // ═══════════════════════════════════════════════════════════════════════
-function ProjectSelector({onSelect}){
+function ProjectSelector({user,onSelect,onSignOut}){
   const [projects,setProjects]=useState(null);
   const [creating,setCreating]=useState(false);
   const [newName,setNewName]=useState("");
   const [loading,setLoading]=useState(false);
   const [hov,setHov]=useState(null);
 
-  useEffect(()=>{ loadIndex().then(setProjects); },[]);
+  const refresh=useCallback(async()=>{
+    await acceptPendingInvites();
+    const list=await listMyProjects();
+    setProjects(list);
+  },[]);
+
+  useEffect(()=>{refresh();},[refresh]);
 
   const create=async()=>{
-    if(!newName.trim()) return;
+    if(!newName.trim())return;
     setLoading(true);
-    const proj=makeProject(newName.trim());
-    const idx=[...(projects||[]),{id:proj.id,name:proj.name,created:proj.created}];
-    await saveProject(proj); await saveIndex(idx);
-    setProjects(idx); setCreating(false); setNewName(""); setLoading(false);
-    onSelect(proj);
+    try{
+      const proj=await createProject(newName.trim());
+      setCreating(false);setNewName("");
+      onSelect(proj);
+    }catch(e){alert("Errore creazione: "+e.message);}
+    finally{setLoading(false);}
   };
 
   const open=async(entry)=>{
     setLoading(true);
     const proj=await loadProject(entry.id);
     setLoading(false);
-    if(proj) onSelect(proj); else alert("Progetto non trovato. Potrebbe essere stato eliminato.");
+    if(proj)onSelect(proj);else alert("Progetto non trovato o accesso negato.");
   };
 
   if(projects===null) return <div style={{minHeight:"100vh",background:C.bg,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'DM Sans',sans-serif",fontSize:14,color:C.muted}}>Caricamento...</div>;
@@ -321,15 +454,18 @@ function ProjectSelector({onSelect}){
           </Btn>
         )}
       </div>
-      <div style={{marginTop:40,fontSize:11,color:"#B0A89A",letterSpacing:"0.05em"}}>
-        I dati sono condivisi tra tutti gli utenti che accedono a questo link
+      <div style={{marginTop:30,display:"flex",alignItems:"center",gap:10,fontSize:11,color:C.muted}}>
+        {user?.user_metadata?.avatar_url&&<img src={user.user_metadata.avatar_url} alt="" style={{width:22,height:22,borderRadius:"50%"}}/>}
+        <span>{user?.email}</span>
+        <span style={{color:C.border}}>·</span>
+        <button onClick={onSignOut} style={{background:"none",border:"none",color:C.muted,cursor:"pointer",fontSize:11,fontFamily:"inherit",textDecoration:"underline"}}>Esci</button>
       </div>
     </div>
   );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// AUTH SCREEN
+// AUTH SCREEN (unused — sostituito da Supabase auth + invite)
 // ═══════════════════════════════════════════════════════════════════════
 function AuthScreen({project,onAuth,onBack}){
   const [step,setStep]=useState("role"); // "role" | "password" | "supplier"
@@ -462,7 +598,7 @@ function Sidebar({view,setView,role,supplierName,projectName,onSwitchRole,onSwit
       </nav>
       <div style={{padding:"12px 10px",borderTop:"1px solid rgba(255,255,255,0.07)",display:"flex",flexDirection:"column",gap:6}}>
         <button onClick={onSwitchRole} style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1px solid rgba(255,255,255,0.12)",background:"transparent",color:"rgba(255,255,255,0.45)",fontSize:12,fontFamily:"'DM Sans',sans-serif",cursor:"pointer",textAlign:"left"}}>
-          ⇄ Cambia ruolo
+          ⏻ Esci
         </button>
         <button onClick={onSwitchProject} style={{width:"100%",padding:"8px 10px",borderRadius:8,border:"1px solid rgba(255,255,255,0.08)",background:"transparent",color:"rgba(255,255,255,0.3)",fontSize:12,fontFamily:"'DM Sans',sans-serif",cursor:"pointer",textAlign:"left"}}>
           ← Cambia progetto
@@ -1509,9 +1645,9 @@ function PortaleFornitore({project,supplierName,onEdit}){
 // ═══════════════════════════════════════════════════════════════════════
 // SETTINGS VIEW
 // ═══════════════════════════════════════════════════════════════════════
-function SettingsView({project,onUpdate,onRenameIndex}){
+function SettingsView({project,onUpdate,onSwitchProject}){
   const [tab,setTab]=useState("progetto");
-  const tabs=[{id:"progetto",label:"⚙ Progetto"},{id:"struttura",label:"🏗 Struttura"},{id:"categorie",label:"🏷 Categorie"}];
+  const tabs=[{id:"progetto",label:"⚙ Progetto"},{id:"membri",label:"👥 Membri"},{id:"struttura",label:"🏗 Struttura"},{id:"categorie",label:"🏷 Categorie"}];
 
   return (
     <div>
@@ -1522,40 +1658,156 @@ function SettingsView({project,onUpdate,onRenameIndex}){
             fontWeight:tab===t.id?600:400,color:tab===t.id?C.accent:C.muted,
             borderBottom:tab===t.id?`2px solid ${C.accent}`:"2px solid transparent",marginBottom:-1}}>{t.label}</button>)}
       </div>
-      {tab==="progetto"  &&<ProjectSettings    project={project} onUpdate={onUpdate} onRenameIndex={onRenameIndex}/>}
+      {tab==="progetto"  &&<ProjectSettings    project={project} onUpdate={onUpdate} onSwitchProject={onSwitchProject}/>}
+      {tab==="membri"    &&<MembersSettings    project={project}/>}
       {tab==="struttura" &&<StrutturaSettings  project={project} onUpdate={onUpdate}/>}
       {tab==="categorie" &&<CategorieSettings  project={project} onUpdate={onUpdate}/>}
     </div>
   );
 }
 
-function ProjectSettings({project,onUpdate,onRenameIndex}){
+function MembersSettings({project}){
+  const [members,setMembers]=useState([]);
+  const [invites,setInvites]=useState([]);
+  const [loading,setLoading]=useState(true);
+  const [email,setEmail]=useState("");
+  const [role,setRole]=useState("committente");
+  const [supplierName,setSupplierName]=useState("");
+  const [busy,setBusy]=useState(false);
+  const [msg,setMsg]=useState(null);
+
+  const refresh=useCallback(async()=>{
+    setLoading(true);
+    const[m,i]=await Promise.all([loadMembers(project.id),loadInvites(project.id)]);
+    setMembers(m);setInvites(i);setLoading(false);
+  },[project.id]);
+
+  useEffect(()=>{refresh();},[refresh]);
+
+  const handleInvite=async()=>{
+    setMsg(null);
+    if(!email.trim()){setMsg({type:"err",text:"Inserisci un'email"});return;}
+    if(role==="fornitore"&&!supplierName.trim()){setMsg({type:"err",text:"Inserisci il nome del fornitore"});return;}
+    setBusy(true);
+    try{
+      await inviteMember(project.id,email.trim(),role,supplierName.trim()||null);
+      setEmail("");setSupplierName("");
+      setMsg({type:"ok",text:"Invito creato. Sarà accettato automaticamente al primo login."});
+      await refresh();
+    }catch(e){
+      const t=e.message?.includes("duplicate")||e.message?.includes("unique")?"Esiste già un invito per questa email":e.message;
+      setMsg({type:"err",text:t});
+    }finally{setBusy(false);setTimeout(()=>setMsg(null),5000);}
+  };
+
+  const handleRemove=async(userId,name)=>{
+    if(!window.confirm(`Rimuovere ${name} dal progetto?`))return;
+    await removeMember(project.id,userId);await refresh();
+  };
+
+  const handleCancelInvite=async(id)=>{
+    if(!window.confirm("Annullare l'invito?"))return;
+    await cancelInvite(id);await refresh();
+  };
+
+  const roleColor={architetto:C.accent,committente:C.gold,fornitore:"#7A8C6E"};
+
+  return (
+    <div style={{maxWidth:680,display:"flex",flexDirection:"column",gap:16}}>
+      <Card style={{padding:22}}>
+        <div style={{fontFamily:"'Cormorant Garamond',serif",fontSize:16,fontWeight:600,color:C.text,marginBottom:4}}>Invita un nuovo membro</div>
+        <div style={{fontSize:12,color:C.muted,marginBottom:14}}>L'invitato accederà con la stessa email. Al primo login con Google, l'invito viene accettato automaticamente.</div>
+        <div style={{display:"grid",gridTemplateColumns:"1.5fr 1fr",gap:10,alignItems:"end"}}>
+          <div><Lbl>Email</Lbl><Inp value={email} onChange={setEmail} placeholder="es. mario.rossi@example.com" type="email"/></div>
+          <div><Lbl>Ruolo</Lbl>
+            <Sel value={role} onChange={setRole}>
+              <option value="architetto">Architetto (gestione completa)</option>
+              <option value="committente">Committente (visualizzazione + approvazione)</option>
+              <option value="fornitore">Fornitore (solo le sue voci)</option>
+            </Sel>
+          </div>
+        </div>
+        {role==="fornitore"&&<div style={{marginTop:10}}><Lbl>Nome azienda fornitore *</Lbl>
+          <Inp value={supplierName} onChange={setSupplierName} placeholder="Es. Ceramiche Siciliane srl"/>
+          <div style={{fontSize:11,color:C.muted,marginTop:4}}>Vedrà solo le voci con "Fornitore di riferimento" uguale a questo nome.</div>
+        </div>}
+        <div style={{display:"flex",gap:10,alignItems:"center",marginTop:14}}>
+          <Btn onClick={handleInvite} disabled={busy}>{busy?"Invio...":"+ Invia invito"}</Btn>
+          {msg&&<span style={{fontSize:12,color:msg.type==="ok"?"#059669":"#DC2626"}}>{msg.text}</span>}
+        </div>
+      </Card>
+
+      <Card style={{padding:22}}>
+        <div style={{fontFamily:"'Cormorant Garamond',serif",fontSize:16,fontWeight:600,color:C.text,marginBottom:14}}>Membri attivi ({members.length})</div>
+        {loading?<div style={{fontSize:12,color:C.muted}}>Caricamento...</div>:
+        members.length===0?<div style={{fontSize:13,color:C.muted}}>Nessun membro.</div>:
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          {members.map(m=>{
+            const p=m.profiles||{};
+            return (
+              <div key={m.user_id} style={{display:"flex",alignItems:"center",gap:12,padding:"10px 12px",background:"#F8F4EF",borderRadius:8}}>
+                {p.avatar_url?<img src={p.avatar_url} alt="" style={{width:32,height:32,borderRadius:"50%"}}/>:
+                <div style={{width:32,height:32,borderRadius:"50%",background:C.border,display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,color:C.muted}}>👤</div>}
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontSize:13,fontWeight:500,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.display_name||p.email||"—"}</div>
+                  <div style={{fontSize:11,color:C.muted}}>{p.email}{m.supplier_name&&` · ${m.supplier_name}`}</div>
+                </div>
+                <span style={{fontSize:11,padding:"3px 9px",borderRadius:99,background:(roleColor[m.role]||"#888")+"22",color:roleColor[m.role]||"#888",fontWeight:600,whiteSpace:"nowrap"}}>{ROLES[m.role]?.label||m.role}</span>
+                <Btn variant="ghost" size="xs" onClick={()=>handleRemove(m.user_id,p.display_name||p.email)} style={{color:"#DC2626"}}>✕</Btn>
+              </div>
+            );
+          })}
+        </div>}
+      </Card>
+
+      {invites.length>0&&<Card style={{padding:22}}>
+        <div style={{fontFamily:"'Cormorant Garamond',serif",fontSize:16,fontWeight:600,color:C.text,marginBottom:14}}>Inviti pendenti ({invites.length})</div>
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          {invites.map(inv=>(
+            <div key={inv.id} style={{display:"flex",alignItems:"center",gap:12,padding:"10px 12px",background:"#FFFBEB",borderRadius:8,border:"1px solid #FEF3C7"}}>
+              <div style={{width:32,height:32,borderRadius:"50%",background:"#FDE68A",display:"flex",alignItems:"center",justifyContent:"center",fontSize:14}}>✉</div>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontSize:13,fontWeight:500,color:C.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{inv.email}</div>
+                <div style={{fontSize:11,color:C.muted}}>{ROLES[inv.role]?.label||inv.role}{inv.supplier_name&&` · ${inv.supplier_name}`} · in attesa del primo login</div>
+              </div>
+              <Btn variant="ghost" size="xs" onClick={()=>handleCancelInvite(inv.id)} style={{color:"#DC2626"}}>✕ Annulla</Btn>
+            </div>
+          ))}
+        </div>
+      </Card>}
+    </div>
+  );
+}
+
+function ProjectSettings({project,onUpdate,onSwitchProject}){
   const [name,setName]=useState(project.name);
-  const [archPw,setArchPw]=useState(project.archPassword);
-  const [clientPw,setClientPw]=useState(project.clientPassword);
   const [saved,setSaved]=useState(false);
+  const [deleting,setDeleting]=useState(false);
   const save=()=>{
-    const upd={...project,name:name.trim()||project.name,archPassword:archPw||project.archPassword,clientPassword:clientPw||project.clientPassword};
-    onUpdate(upd); onRenameIndex(upd.id,upd.name); setSaved(true); setTimeout(()=>setSaved(false),2000);
+    const upd={...project,name:name.trim()||project.name};
+    onUpdate(upd); setSaved(true); setTimeout(()=>setSaved(false),2000);
+  };
+  const handleDelete=async()=>{
+    if(!window.confirm(`Eliminare il progetto "${project.name}"?\n\nVerranno persi: tutti gli articoli, offerte, commenti, membri e inviti.\nL'operazione è IRREVERSIBILE.`))return;
+    setDeleting(true);
+    try{await deleteProjectRow(project.id);onSwitchProject();}
+    catch(e){alert("Errore: "+e.message);setDeleting(false);}
   };
   return (
     <div style={{maxWidth:480,display:"flex",flexDirection:"column",gap:18}}>
       <Card style={{padding:22}}>
         <div style={{fontFamily:"'Cormorant Garamond',serif",fontSize:16,fontWeight:600,color:C.text,marginBottom:14}}>Nome progetto</div>
         <Inp value={name} onChange={setName} placeholder="Es. Hotel Taormina"/>
-      </Card>
-      <Card style={{padding:22}}>
-        <div style={{fontFamily:"'Cormorant Garamond',serif",fontSize:16,fontWeight:600,color:C.text,marginBottom:14}}>Password di accesso</div>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
-          <div><Lbl>Architetto</Lbl><Inp value={archPw} onChange={setArchPw} type="password" placeholder="Password architetto"/></div>
-          <div><Lbl>Committente</Lbl><Inp value={clientPw} onChange={setClientPw} type="password" placeholder="Password committente"/></div>
+        <div style={{display:"flex",gap:10,alignItems:"center",marginTop:14}}>
+          <Btn onClick={save}>{saved?"✓ Salvato":"Salva"}</Btn>
+          {saved&&<span style={{fontSize:12,color:"#059669"}}>Modifiche salvate</span>}
         </div>
-        <div style={{fontSize:11,color:C.muted,marginTop:8}}>I fornitori accedono con il nome azienda, senza password.</div>
       </Card>
-      <div style={{display:"flex",gap:10,alignItems:"center"}}>
-        <Btn onClick={save}>{saved?"✓ Salvato":"Salva impostazioni"}</Btn>
-        {saved&&<span style={{fontSize:12,color:"#059669"}}>Modifiche salvate</span>}
-      </div>
+      <Card style={{padding:22,border:"1px solid #FEE2E2"}}>
+        <div style={{fontFamily:"'Cormorant Garamond',serif",fontSize:16,fontWeight:600,color:"#DC2626",marginBottom:8}}>Zona pericolo</div>
+        <div style={{fontSize:12,color:C.muted,marginBottom:12}}>Eliminare il progetto è permanente. Tutti i membri perderanno accesso e i dati non sono recuperabili.</div>
+        <Btn variant="danger" onClick={handleDelete} disabled={deleting}>{deleting?"Elimino...":"🗑 Elimina progetto"}</Btn>
+      </Card>
     </div>
   );
 }
@@ -1740,8 +1992,8 @@ function CategorieSettings({project,onUpdate}){
 // MAIN APP
 // ═══════════════════════════════════════════════════════════════════════
 function App(){
-  const [screen,setScreen]=useState("projects"); // "projects" | "auth" | "main"
-  const [projectMeta,setProjectMeta]=useState(null); // {id,name} lightweight
+  const [session,setSession]=useState(undefined); // undefined=loading, null=logged out
+  const [screen,setScreen]=useState("projects"); // "projects" | "main"
   const [project,setProject]=useState(null);
   const [role,setRole]=useState(null);
   const [supplierName,setSupplierName]=useState("");
@@ -1749,15 +2001,32 @@ function App(){
   const [modal,setModal]=useState(null);
   const [filters,setFilters]=useState({search:"",filterZone:"",filterCat:"",filterStatus:""});
 
+  // Supabase session bootstrap
+  useEffect(()=>{
+    if(!sb){setSession(null);return;}
+    sb.auth.getSession().then(({data})=>setSession(data.session||null));
+    const{data:sub}=sb.auth.onAuthStateChange((_e,s)=>setSession(s));
+    return()=>sub.subscription.unsubscribe();
+  },[]);
+
+  // Realtime: refresh project on remote update
+  useEffect(()=>{
+    if(!sb||!project?.id)return;
+    const ch=sb.channel(`p-${project.id}`)
+      .on("postgres_changes",{event:"UPDATE",schema:"public",table:"projects",filter:`id=eq.${project.id}`},
+        payload=>{
+          const r=payload.new;
+          setProject(p=>p&&p.id===r.id?{id:r.id,name:r.name,owner_id:r.owner_id,...(r.data||{})}:p);
+        })
+      .subscribe();
+    return()=>{sb.removeChannel(ch);};
+  },[project?.id]);
+
   const updateProject=useCallback(async upd=>{
     setProject(upd); await saveProject(upd);
   },[]);
 
-  const renameIndex=useCallback(async(id,name)=>{
-    const idx=await loadIndex();
-    const updated=idx.map(p=>p.id===id?{...p,name}:p);
-    await saveIndex(updated);
-  },[]);
+  const renameIndex=useCallback(async()=>{},[]); // no-op: nome è già su projects.name e si aggiorna via saveProject
 
   const updateItem=useCallback(item=>{
     const prev=project.items.find(i=>i.id===item.id);
@@ -1813,8 +2082,15 @@ function App(){
   const pendingOffers=useMemo(()=>project?project.items.reduce((s,i)=>s+(i.offers?.filter(o=>!o.isSelected).length||0),0):0,[project]);
   const perm=role?ROLES[role]:null;
 
-  if(screen==="projects") return <ProjectSelector onSelect={proj=>{setProjectMeta({id:proj.id,name:proj.name});setProject(proj);setScreen("auth");}}/>;
-  if(screen==="auth") return <AuthScreen project={project} onAuth={(r,sn)=>{setRole(r);setSupplierName(sn);setView(r==="fornitore"?"portal":"dashboard");setScreen("main");}} onBack={()=>setScreen("projects")}/>;
+  if(session===undefined) return <div style={{minHeight:"100vh",background:C.bg,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'DM Sans',sans-serif",fontSize:14,color:C.muted}}>Caricamento...</div>;
+  if(!session) return <LoginScreen/>;
+  const handleSignOut=async()=>{await signOut();setProject(null);setRole(null);setSupplierName("");setScreen("projects");};
+  if(screen==="projects") return <ProjectSelector user={session.user} onSignOut={handleSignOut} onSelect={async proj=>{
+    const m=await loadMyMembership(proj.id);
+    if(!m){alert("Non sei membro di questo progetto.");return;}
+    setProject(proj);setRole(m.role);setSupplierName(m.supplier_name||"");
+    setView(m.role==="fornitore"?"portal":"dashboard");setScreen("main");
+  }}/>;
 
   return (
     <div style={{display:"flex",height:"100vh",fontFamily:"'DM Sans',sans-serif",background:C.bg,color:C.text,overflow:"hidden"}}>
@@ -1822,8 +2098,8 @@ function App(){
 
       <Sidebar view={view} setView={setView} role={role} supplierName={supplierName}
         projectName={project.name}
-        onSwitchRole={()=>setScreen("auth")}
-        onSwitchProject={()=>{setScreen("projects");setRole(null);setSupplierName("");}}
+        onSwitchRole={handleSignOut}
+        onSwitchProject={()=>{setScreen("projects");setRole(null);setSupplierName("");setProject(null);}}
         pendingOffers={pendingOffers}/>
 
       <div style={{flex:1,overflow:"auto",display:"flex",flexDirection:"column"}}>
@@ -1856,7 +2132,7 @@ function App(){
             filters={filters} setFilters={setFilters}/>}
           {view==="zone"      &&<ZoneView project={project} role={role}/>}
           {view==="portal"    &&<PortaleFornitore project={project} supplierName={supplierName} onEdit={(item)=>setModal(item)}/>}
-          {view==="settings"  &&<SettingsView project={project} onUpdate={updateProject} onRenameIndex={renameIndex}/>}
+          {view==="settings"  &&<SettingsView project={project} onUpdate={updateProject} onSwitchProject={()=>{setScreen("projects");setRole(null);setSupplierName("");setProject(null);}}/>}
         </main>
       </div>
 
