@@ -193,12 +193,13 @@ async function saveProject(proj){
 
 async function createProject(name){
   if(!sb)throw new Error("Supabase non configurato");
-  const{data:{user}}=await sb.auth.getUser();
-  if(!user)throw new Error("Non autenticato");
+  const{data:{session}}=await sb.auth.getSession();
+  const user=session?.user;
+  if(!user)throw new Error("Non autenticato — fai logout/login");
   const seed=makeProjectData();
   const{data,error}=await sb.from("projects").insert({name,data:seed,owner_id:user.id}).select().single();
   if(error){console.error("createProject insert failed:",error);throw error;}
-  // Verify membership row was created by the trigger; if not (es. trigger SQL non eseguito), aggiungilo manualmente
+  // Verify membership row was created by the trigger; if not, aggiungilo manualmente
   const{data:mem}=await sb.from("project_members").select("role").eq("project_id",data.id).eq("user_id",user.id).maybeSingle();
   if(!mem){
     console.warn("Trigger on_project_created non ha aggiunto la membership; aggiungo manualmente");
